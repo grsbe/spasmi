@@ -1,0 +1,157 @@
+# Spasmi.jl
+
+Sparse and smooth reconstruction for linear inverse problems in Julia.
+Given observations $b$ and a forward operator $A$, Spasmi estimates sparse
+coefficients $x$ with optional nonnegativity and spatial regularization.
+The core choices are explicit: **problem**, **solver**, **stopping rule**,
+and **regularization path**.
+
+Spasmi is a new package under development, not a drop-in replacement for
+SparseReconstructionToolkit (SRT). It retains a small, separate compatibility
+surface; SRT remains unchanged.
+
+## What is provided
+
+| Reconstruction problem | Solver | Current support |
+| --- | --- | --- |
+| Signed or nonnegative penalized LASSO | FISTA, ADMM; optional Gurobi QP | FISTA: dense/sparse CPU and dense/CSR CUDA; ADMM: dense CPU |
+| Signed or nonnegative least squares in an L1 ball | FISTA, ADMM | Dense CPU |
+| Sparse block plus smooth ridge block; independent nonnegativity on each block | FISTA | Dense CPU |
+| L1 plus squared graph-Laplacian smoothing | FISTA | Dense CPU |
+| L1 plus 2D isotropic or anisotropic total variation | PDHG | Dense CPU |
+
+The central problem is
+
+$$
+\min_{x\in C}\ \frac12\|Ax-b\|_2^2+\lambda\|x\|_1,
+$$
+
+where $C$ is the full space or the nonnegative orthant. The other problem
+types replace or augment the regularizer; they do not hide all choices behind
+a single constructor. For a block problem, use `BlockLassoRidgeProblem(A, B, b;
+x_constraint=:nonnegative, z_constraint=:signed)` (or reverse the two)
+to control the L1 and L2 blocks independently. The `constraint` keyword
+still sets both blocks together.
+
+A LASSO solver can be reused across a descending
+$\lambda$ path with warm starts. Results own their coefficient arrays and
+report numerical diagnostics rather than only a vector.
+
+Spasmi does **not** select a scientifically appropriate $\lambda$, estimate
+transport/model error, build footprints, or turn coefficient positivity into
+physical field positivity. Form the design, subtract backgrounds or priors,
+and apply measurement weighting before creating a problem.
+
+## Start here
+
+```julia
+using Spasmi, LinearAlgebra
+
+A = Matrix{Float64}(I, 3, 3)
+b = [2.0, -1.0, 0.5]
+problem = LassoProblem(A, b; constraint=:nonnegative)
+method = FISTA(step=:auto)  # iterate-change gate, then dual-gap certificate
+result = solve(problem, method, 0.2)
+
+@show result.x result.converged result.kkt_ratio
+
+# Reuse workspaces and warm-start a descending path.
+solver = initialize(problem, method)
+results = solve_path!(solver)  # 30 log-spaced λ, from λmax to 1e-4 λmax
+# Or inspect/customize the grid; explicit paths still work:
+lambdas = lambda_grid(problem; min_ratio=1e-2, n_lambdas=50)
+results = solve_path!(solver, lambdas)
+```
+
+The automatic LASSO path computes its full grid by default; a flat RMSE
+does not stop it or imply stable coefficients. Choose a λ using a separate
+criterion (for example, an uncertainty-based discrepancy), not simply the
+last path point. The `1e-4` endpoint is a coverage default, not a
+scientific optimum.
+
+`result.converged` means the selected **numerical** stop passed. It does
+not validate $A$, $b$, the background, uncertainty model, or choice of
+$\lambda$. The default `DualGapStop(tol=1e-4)` first checks whether the largest
+coefficient update is at most `tol` times the largest coefficient; only
+then does it check a returned-point primal-dual gap against
+`tol * norm(b)^2`. The latter matches scikit-learn's normalization for
+Spasmi's unnormalized objective. `KKTStop` and the older
+`GradientMappingStop` remain explicit alternatives. For a zero L1 penalty (or zero ridge penalty in the block model), the
+FISTA default uses a scaled KKT fallback; ADMM uses an absolute KKT
+fallback at zero L1 penalty. No dual gap is claimed in these cases.
+
+For example, choose the older gradient-mapping rule explicitly:
+
+```julia
+method = FISTA(stop=GradientMappingStop(rtol=1e-4))
+result = solve(problem, method, 0.2)
+@show result.stop_reason result.kkt_ratio
+```
+
+The optional gradient-mapping rule uses the already-computed gradient at
+FISTA's extrapolated point.
+It is cheaper to check, but is **not** the exact KKT test at the returned
+coefficients. FISTA and ADMM use dual-gap stopping by default where a
+certificate is implemented; ADMM also requires primal and dual feasibility.
+TV-PDHG keeps its existing primal–dual/KKT checks. Penalized results always
+warn when the final returned-point KKT residual exceeds `0.1 * λ`, even if
+a dual-gap stop passed. A warning is a diagnostic, not a reversal of
+`converged=true`. See [optimality](docs/optimality.md).
+
+For a path too large to retain in memory:
+
+```julia
+solve_path!(solver, [2.0, 0.5, 0.2]; store=false,
+            on_result=(i, r) -> println(i, " ", r.kkt_ratio))
+```
+
+A callback can write each result to your own checkpoint. On-disk resume is
+not yet integrated.
+
+For grouped model selection, `ordered_group_folds` keeps whole days (or
+other supplied groups) together, and `cross_validate` evaluates shared
+`lambda/lambda_max` ratios with a fresh training-only `lambda_max` in each
+fold. See [grouped cross-validation](docs/cross_validation.md).
+
+## Choosing a method
+
+Start with FISTA for a large or GPU-resident penalized LASSO problem. ADMM
+is a CPU alternative that caches a factorization; for a wide design it
+factors the smaller $AA^\top+\rho I$ system. Compare both on your actual
+conditioning and memory budget. Use the other problem types only when their
+penalties match the scientific model. GPU acceleration is important here,
+but CUDA is optional: the caller explicitly places $A$ and $b$ on device.
+
+The initial FISTA step is selected once when the solver is initialized.
+`step=:auto` uses an exact spectral norm for small dense CPU matrices and
+a power estimate otherwise. The power estimate is fast, **not a certified
+upper bound**. For a guaranteed conservative step use `:frobenius`, or
+pass a justified positive step. See [performance](docs/performance.md).
+
+## Documentation
+
+- [Overview and reading guide](docs/index.md)
+- [Mathematical models and algorithms](docs/mathematics.md)
+- [Optimality and stopping](docs/optimality.md)
+- [Performance: defaults, costs, and trade-offs](docs/performance.md)
+- [Architecture and migration status](docs/architecture.md)
+
+The pages are plain Markdown ready to be used by Documenter.jl later;
+a published documentation site has not been configured.
+
+## Status and tests
+
+Spasmi has tests for analytical solutions, KKT and primal-dual stopping,
+correlated columns, warm-start ownership, paths, and the SRT ADMM
+false-convergence example. Optional tests compare migrated objectives and
+the legacy FISTA stop with SRT, test CUDA on an NVIDIA RTX PRO 6000
+Blackwell, and compare against Gurobi. Run core tests from the repository:
+
+```bash
+julia --project=. test/runtests.jl
+```
+
+Soft-min robust LASSO, SRT's remaining hyperparameter/uncertainty workflows,
+and integrated disk checkpoints have not been migrated. Grouped LASSO CV is
+available. The Gurobi extension
+covers basic penalized LASSO only. No publication license has been chosen.

@@ -1,0 +1,9 @@
+# Low-lambda returned-point KKT test
+
+This is a targeted follow-up to the [full path](../lasso_paths/README.md), **not** another lambda-selection rule. [Script](../../../srt_testdata_kkt_tail.jl) re-solves path points 21–31 on the Blackwell GPU in CSR storage, using the original step size and a warm start from the saved point 21. The stopping condition is `KKTStop(atol=0, rtol=0.01, check_every=25, maxiter=100000)`: the returned-point KKT residual must be at most 1% of lambda. Each point is checkpointed as `point_XXX.jld2`; a rerun resumes from those checkpoints.
+
+- [comparison.csv](comparison.csv) compares refined and default-stop fields and predictions at identical lambda values. All 11 refined solves reached KKT/lambda < 0.01. At the final lambda, `5.283704448991288e-9`, the field differs by **23.93%** from the default-stop field, while predictions differ by only **0.359% of ||b||**. Default-stop KKT/lambda was 0.611; refined KKT/lambda is 0.00898. The default field has 193 nonzero coefficients there versus 126 after refinement.
+- The refined field still changes by **9.52%** between the last two lambda points. Thus accurate solves do not turn the RMSE plateau into a field plateau.
+- [truth_diagnostics.csv](truth_diagnostics.csv) uses the benchmark's known target field. Relative field error for the refined path increases from **0.4165** at point 21 to **0.4736** at point 31, while the training residual decreases from 0.0021679 to 0.0021583. The true measurement-noise norm is 0.0021798. On this synthetic problem, the lower-lambda tail demonstrably fits noise better while recovering the field worse.
+
+This establishes two distinct effects: the default gradient-mapping tolerance is too loose relative to tiny lambda for accurate coefficients, **and** shrinking lambda further can worsen reconstruction even after proper numerical convergence. The test does not establish which criterion should select lambda on real inversion data.

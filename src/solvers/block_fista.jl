@@ -1,0 +1,302 @@
+"""
+    BlockLassoRidgeProblem(A, B, b; constraint=:signed,
+                           x_constraint=constraint, z_constraint=constraint)
+
+The design for `min ½‖Ax+Bz-b‖² + λ‖x‖₁ + γ/2‖z‖²`. With
+`x_constraint` and `z_constraint` independently select `:signed` or
+`:nonnegative`. The legacy `constraint` keyword sets both unless overridden.
+"""
+struct BlockLassoRidgeProblem{MA<:AbstractMatrix,MB<:AbstractMatrix,VB<:AbstractVector}
+    A::MA
+    B::MB
+    b::VB
+    x_constraint::Symbol
+    z_constraint::Symbol
+end
+
+function BlockLassoRidgeProblem(A::AbstractMatrix, B::AbstractMatrix,
+                                b::AbstractVector; constraint=:signed,
+                                x_constraint=constraint, z_constraint=constraint)
+    LassoProblem(A, b; constraint=x_constraint)
+    z_constraint in (:signed, :nonnegative) ||
+        throw(ArgumentError("z_constraint must be :signed or :nonnegative"))
+    size(B, 1) == length(b) ||
+        throw(DimensionMismatch("B rows must match length(b)"))
+    size(B, 2) > 0 || throw(ArgumentError("B must have at least one column"))
+    eltype(B) == eltype(b) ||
+        throw(ArgumentError("A, B, and b must have the same float element type"))
+    all(isfinite, B) || throw(ArgumentError("B must be finite"))
+    return BlockLassoRidgeProblem(A, B, b, x_constraint, z_constraint)
+end
+
+"""
+    block_dual_gap(problem, x, z, lambda, ridge)
+
+Primal-dual gap for a positive ridge penalty and positive L1 penalty.
+The data residual is scaled to satisfy the sparse-block dual constraint.
+The ridge-block conjugate is quadratic; for nonnegative ridge coefficients
+it uses only the negative part of `B'u`.
+"""
+function block_dual_gap(problem::BlockLassoRidgeProblem, x, z,
+                        lambda, ridge)
+    _validate_lambda(lambda)
+    ridge > 0 || throw(ArgumentError("ridge must be positive for the dual gap"))
+    lambda > 0 || throw(ArgumentError("lambda must be positive for the dual gap"))
+    problem.x_constraint == :nonnegative && minimum(x) < 0 &&
+        throw(ArgumentError("x must be nonnegative"))
+    problem.z_constraint == :nonnegative && minimum(z) < 0 &&
+        throw(ArgumentError("z must be nonnegative"))
+    residual = problem.A * x + problem.B * z - problem.b
+    gx = adjoint(problem.A) * residual
+    bound = problem.x_constraint == :signed ?
+            maximum(abs, gx) : max(zero(lambda), maximum(-gx))
+    scale = max(one(float(lambda)), bound / lambda)
+    gz = adjoint(problem.B) * residual
+    ridge_dual = problem.z_constraint == :signed ?
+                 sum(abs2, gz) :
+                 sum(abs2, min.(gz, zero(eltype(gz))))
+    primal = 0.5 * sum(abs2, residual) + lambda * sum(abs, x) +
+             0.5 * ridge * sum(abs2, z)
+    gap = primal + 0.5 * sum(abs2, residual) / scale^2 +
+          dot(problem.b, residual) / scale +
+          ridge_dual / (2 * ridge * scale^2)
+    return max(zero(gap), gap)
+end
+
+"""Owned sparse and ridge coefficient snapshots with joint KKT diagnostics."""
+struct BlockResult{VX,VZ,T,D}
+    x::VX
+    z::VZ
+    lambda::T
+    ridge::T
+    objective::T
+    residual_norm::T
+    kkt_residual::T
+    kkt_ratio::T
+    converged::Bool
+    stop_reason::Symbol
+    iterations::Int
+    diagnostics::D
+end
+
+function block_kkt_residual(problem::BlockLassoRidgeProblem, x, z,
+                            lambda, ridge)
+    _validate_lambda(lambda)
+    _validate_lambda(ridge)
+    length(x) == size(problem.A, 2) ||
+        throw(DimensionMismatch("x must match the A columns"))
+    length(z) == size(problem.B, 2) ||
+        throw(DimensionMismatch("z must match the B columns"))
+    problem.x_constraint == :nonnegative && minimum(x) < 0 &&
+        throw(ArgumentError("x must be nonnegative"))
+    problem.z_constraint == :nonnegative && minimum(z) < 0 &&
+        throw(ArgumentError("z must be nonnegative"))
+    residual = problem.A * x + problem.B * z - problem.b
+    gx = adjoint(problem.A) * residual
+    gz = adjoint(problem.B) * residual .+ ridge .* z
+    vx = if problem.x_constraint == :nonnegative
+        ifelse.(x .> 0, abs.(gx .+ lambda), max.(-gx .- lambda, 0))
+    else
+        ifelse.(x .> 0, abs.(gx .+ lambda),
+                ifelse.(x .< 0, abs.(gx .- lambda),
+                        max.(abs.(gx) .- lambda, 0)))
+    end
+    vz = problem.z_constraint == :nonnegative ?
+         ifelse.(z .> 0, abs.(gz), max.(-gz, 0)) : abs.(gz)
+    return max(maximum(vx), maximum(vz))
+end
+
+function _block_result(problem, coefficients, nx, lambda, ridge,
+                       converged, reason, iterations, diagnostics)
+    x = copy(view(coefficients, 1:nx))
+    z = copy(view(coefficients, nx+1:length(coefficients)))
+    residual = norm(problem.A * x + problem.B * z - problem.b)
+    objective = 0.5 * residual^2 + lambda * sum(abs, x) +
+                0.5 * ridge * sum(abs2, z)
+    kkt = block_kkt_residual(problem, x, z, lambda, ridge)
+    ratio = iszero(lambda) ? (iszero(kkt) ? zero(kkt) : oftype(kkt, Inf)) :
+            kkt / lambda
+    T = promote_type(typeof(objective), typeof(float(lambda)),
+                     typeof(float(ridge)))
+    _warn_kkt_ratio(ratio, lambda, reason)
+    return BlockResult(x, z, T(lambda), T(ridge), T(objective),
+                       T(residual), T(kkt), T(ratio), converged, reason,
+                       iterations, diagnostics)
+end
+
+"""
+Reusable CPU FISTA solver for the sparse-plus-ridge block objective.
+The combined design `[A B]` is materialized once at initialization.
+"""
+mutable struct BlockFISTASolver{P,S,T}
+    problem::P
+    base::S
+    nx::Int
+    ridge::T
+    step::T
+end
+
+function BlockFISTASolver(problem::BlockLassoRidgeProblem, ridge;
+                          step=:auto, stop=DualGapStop(), x0=nothing,
+                          z0=nothing, power_iterations=50,
+                          power_safety=1.2)
+    _validate_lambda(ridge)
+    problem.A isa StridedMatrix && problem.B isa StridedMatrix ||
+        throw(ArgumentError("block FISTA currently requires CPU dense matrices"))
+    T = eltype(problem.b)
+    nx, nz = size(problem.A, 2), size(problem.B, 2)
+    x_initial = isnothing(x0) ? zeros(T, nx) : Vector{T}(x0)
+    z_initial = isnothing(z0) ? zeros(T, nz) : Vector{T}(z0)
+    length(x_initial) == nx || throw(DimensionMismatch("x0 has wrong length"))
+    length(z_initial) == nz || throw(DimensionMismatch("z0 has wrong length"))
+    all(isfinite, x_initial) && all(isfinite, z_initial) ||
+        throw(ArgumentError("initial coefficients must be finite"))
+    problem.x_constraint == :nonnegative && minimum(x_initial) < 0 &&
+        throw(ArgumentError("x0 must be nonnegative"))
+    problem.z_constraint == :nonnegative && minimum(z_initial) < 0 &&
+        throw(ArgumentError("z0 must be nonnegative"))
+    combined = hcat(problem.A, problem.B)
+    base = FISTASolver(LassoProblem(combined, problem.b);
+                       step, stop, x0=vcat(x_initial, z_initial),
+                       power_iterations, power_safety)
+    # A numeric step is interpreted as the step for the full block objective.
+    actual_step = step isa Real ? base.step : inv(inv(base.step) + ridge)
+    actual_step > 0 || throw(ArgumentError("block step underflowed to zero"))
+    return BlockFISTASolver(problem, base, nx, T(ridge), T(actual_step))
+end
+
+function solve!(solver::BlockFISTASolver, lambda; warm_start=true)
+    _validate_lambda(lambda)
+    p, base, nx, ridge, t = solver.problem, solver.base, solver.nx,
+                             solver.ridge, solver.step
+    x, y, previous = base.x, base.y, base.previous
+    !warm_start && fill!(x, zero(eltype(x)))
+    copyto!(y, x)
+    if base.stop isa KKTStop
+        kkt = block_kkt_residual(p, view(x, 1:nx),
+                                 view(x, nx+1:length(x)), lambda, ridge)
+        if kkt <= _kkt_tolerance(base.stop, lambda)
+            return _block_result(p, x, nx, lambda, ridge, true, :kkt, 0,
+                                 (step=t,))
+        end
+    end
+    momentum_t = one(t)
+    for iteration in 1:base.stop.maxiter
+        copyto!(previous, x)
+        mul!(base.residual, base.problem.A, y)
+        @. base.residual = base.residual - p.b
+        mul!(base.gradient, adjoint(base.problem.A), base.residual)
+        @views base.gradient[nx+1:end] .+= ridge .* y[nx+1:end]
+        @. base.prox_input = y - t * base.gradient
+        @views begin
+            sparse_input = base.prox_input[1:nx]
+            smooth_input = base.prox_input[nx+1:end]
+            sparse_output = x[1:nx]
+            smooth_output = x[nx+1:end]
+            if p.x_constraint == :nonnegative
+                @. sparse_output = max(sparse_input - t * lambda, 0)
+            else
+                @. sparse_output = sign(sparse_input) *
+                                   max(abs(sparse_input) - t * lambda, 0)
+            end
+            if p.z_constraint == :nonnegative
+                @. smooth_output = max(smooth_input, 0)
+            else
+                copyto!(smooth_output, smooth_input)
+            end
+        end
+        if iteration % base.stop.check_every == 0 ||
+           iteration == base.stop.maxiter
+            if base.stop isa KKTStop
+                kkt = block_kkt_residual(p, view(x, 1:nx),
+                                         view(x, nx+1:length(x)), lambda, ridge)
+                if kkt <= _kkt_tolerance(base.stop, lambda)
+                    return _block_result(p, x, nx, lambda, ridge, true, :kkt,
+                                         iteration, (step=t,))
+                end
+            elseif base.stop isa DualGapStop
+                change = norm(x - previous, Inf)
+                if change <= base.stop.tol * norm(x, Inf)
+                    if iszero(lambda) || iszero(ridge)
+                        kkt = block_kkt_residual(p, view(x, 1:nx),
+                                                 view(x, nx+1:length(x)),
+                                                 lambda, ridge)
+                        scale = max(norm(adjoint(p.A) * p.b, Inf),
+                                    norm(adjoint(p.B) * p.b, Inf), 1)
+                        if kkt <= base.stop.tol * scale
+                            return _block_result(p, x, nx, lambda, ridge,
+                                                 true, :kkt_dual_degenerate,
+                                                 iteration,
+                                                 (step=t, iterate_change=change))
+                        end
+                    else
+                        gap = block_dual_gap(p, view(x, 1:nx),
+                                             view(x, nx+1:length(x)),
+                                             lambda, ridge)
+                        if gap <= _dual_gap_tolerance(p.b, base.stop)
+                            return _block_result(p, x, nx, lambda, ridge,
+                                                 true, :dual_gap, iteration,
+                                                 (step=t, iterate_change=change,
+                                                  dual_gap=gap))
+                        end
+                    end
+                end
+            else
+                @. base.prox_input = (y - x) / t
+                mapping = norm(base.prox_input, Inf)
+                scale = max(norm(base.gradient, Inf), eps(float(t)))
+                if mapping <= base.stop.atol + base.stop.rtol * scale
+                    result = _block_result(p, x, nx, lambda, ridge, true,
+                                           :gradient_mapping, iteration,
+                                           (step=t, gradient_mapping_residual=mapping,
+                                            gradient_mapping_scale=scale))
+                    return result
+                end
+            end
+        end
+        next_t = (one(momentum_t) + sqrt(one(momentum_t) + 4momentum_t^2)) / 2
+        momentum = (momentum_t - one(momentum_t)) / next_t
+        @. y = x + momentum * (x - previous)
+        momentum_t = next_t
+    end
+    result = _block_result(p, x, nx, lambda, ridge, false, :maxiter,
+                           base.stop.maxiter, (step=t,))
+    return result
+end
+
+initialize(problem::BlockLassoRidgeProblem, method::FISTA, ridge;
+           x0=nothing, z0=nothing) =
+    BlockFISTASolver(problem, ridge; step=method.step, stop=method.stop,
+                      power_iterations=method.power_iterations,
+                      power_safety=method.power_safety, x0, z0)
+
+function solve(problem::BlockLassoRidgeProblem, method::FISTA, lambda, ridge;
+               x0=nothing, z0=nothing)
+    return solve!(initialize(problem, method, ridge; x0, z0), lambda)
+end
+
+"""Warm-start a sparse-plus-ridge solve over λ values at fixed ridge penalty."""
+function solve_path!(solver::BlockFISTASolver, lambdas;
+                     on_result=nothing, store=true, stop_on_failure=false,
+                     restart=false)
+    values = collect(lambdas)
+    isempty(values) && throw(ArgumentError("lambdas must be nonempty"))
+    foreach(_validate_lambda, values)
+    results = store ? BlockResult[] : nothing
+    for (index, lambda) in enumerate(values)
+        result = solve!(solver, lambda; warm_start=index > 1 || !restart)
+        store && push!(results, result)
+        isnothing(on_result) || on_result(index, result)
+        stop_on_failure && !result.converged && break
+    end
+    return results
+end
+
+function solve_path(problem::BlockLassoRidgeProblem, method::FISTA,
+                    lambdas, ridge; x0=nothing, z0=nothing, kwargs...)
+    solver = initialize(problem, method, ridge; x0, z0)
+    return solve_path!(solver, lambdas; kwargs...)
+end
+
+export BlockLassoRidgeProblem, BlockResult, BlockFISTASolver
+export block_kkt_residual, block_dual_gap

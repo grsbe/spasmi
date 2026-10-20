@@ -1,0 +1,65 @@
+# Architecture and migration boundary
+
+The package separates the mathematical problem, numerical method, and public
+interface. `src/api.jl` is the new entry point. `src/compatibility_api.jl` is
+the only place that exposes SRT-style function signatures; it calls the new
+implementations and does not contain duplicate iteration loops.
+
+```text
+src/
+  Spasmi.jl                includes and exports
+  problem.jl               validated mathematical problems
+  result.jl                owned results and stopping policies
+  optimality.jl            independent diagnostics at returned solutions
+  solvers/fista.jl          reusable FISTA, CPU/device-compatible arrays
+  solvers/admm.jl           reusable CPU ADMM
+  solvers/constrained.jl    CPU L1-ball FISTA/ADMM and projected-gradient check
+  solvers/block_fista.jl    CPU sparse-plus-ridge block FISTA
+  solvers/laplacian_fista.jl CPU L1 + squared-Laplacian FISTA
+  solvers/tv_pdhg.jl        CPU L1 + TV PDHG, primal-dual checks
+  workflows/paths.jl       lambda paths and per-point callback
+  api.jl                   new problem → method → result interface
+  compatibility_api.jl     selected old SRT names
+```
+
+## Where the remaining SRT methods will go
+
+Each additional objective gets a **problem type** and a compatible method;
+there will not be a universal constructor with dozens of optional keywords.
+All methods will share the outer result contract, but their optimality
+diagnostics may differ.
+
+| Problem | Implementation location | Status |
+| --- | --- | --- |
+| L1-ball-constrained least squares | `solvers/constrained.jl` | CPU FISTA and ADMM implemented; SRT parity checked |
+| Sparse block + smooth ridge block | `solvers/block_fista.jl` | CPU FISTA and λ path implemented; SRT parity checked |
+| L1 + isotropic/anisotropic total variation | `solvers/tv_pdhg.jl` | CPU PDHG implemented with primal-dual checks; SRT parity checked |
+| L1 + squared graph-Laplacian smoothing | `solvers/laplacian_fista.jl` | CPU FISTA implemented; SRT parity checked |
+| Soft-min robust objective | `solvers/softmin_fista.jl` | Not yet ported |
+| Basic LASSO QP via Gurobi | `ext/SpasmiGurobiExt.jl` | Optional extension implemented |
+| Other Gurobi formulations | `ext/SpasmiGurobiExt.jl` | Not yet ported |
+
+Hyperparameter search and uncertainty/resampling belong in `workflows/`, not
+inside the solvers. GPU FISTA is a first-class implementation of the same
+penalized-LASSO problem; CUDA remains optional. Real-device Float32/Float64
+parity passed on Blackwell. An optional fixed-iteration benchmark exists, but
+larger ill-conditioned workloads, sparse device matrices, and systematic
+performance characterization still need validation.
+
+## Migration rules
+
+1. Freeze SRT reference behavior with representative test problems before
+   moving each solver. Do not alter the old SRT repository during migration.
+2. Port one problem family at a time; compare objective, constraints, and
+   solutions. Where a legacy convergence flag was permissive, document the
+   deliberate change rather than pretending numerical identity.
+3. Add an independent KKT/primal-dual test at the **returned** variable before
+   adding each method to the public API.
+4. Keep compatibility wrappers small and separately tested. A similar name
+   does not promise identical defaults, stopping, or package identity.
+5. Extend the new grouped validation workflow where needed; add atomic path
+   checkpointing and device CI before claiming full SRT replacement.
+
+This is a development package. The package name, UUID, and public interface
+should not be advertised as stable until the remaining methods and migration
+tests are complete.

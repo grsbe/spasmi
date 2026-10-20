@@ -1,0 +1,26 @@
+name = "Spasmi"
+uuid = "3fea0f5b-4774-4b8c-bfb9-727f0d5ab437"
+version = "0.1.0"
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[weakdeps]
+Gurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+
+[extensions]
+SpasmiGurobiExt = ["Gurobi", "JuMP"]
+
+[compat]
+julia = "1.11"
+Gurobi = "1"
+JuMP = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
