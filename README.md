@@ -10,6 +10,32 @@ Spasmi is a new package under development, not a drop-in replacement for
 SparseReconstructionToolkit (SRT). It retains a small, separate compatibility
 surface; SRT remains unchanged.
 
+## Install
+
+Spasmi requires Julia 1.11 or newer and is not registered yet. From this
+checkout, instantiate its environment and verify that it loads:
+
+```bash
+cd /home/tobias-grasberger/spasmi
+julia --project=. -e 'using Pkg; Pkg.instantiate(); using Spasmi'
+```
+
+To use it from another Julia project, activate that project and add this
+checkout as a development dependency:
+
+```julia
+using Pkg
+Pkg.activate("/path/to/your/project")
+Pkg.develop(path="/home/tobias-grasberger/spasmi")
+using Spasmi
+```
+
+CPU solvers need no optional packages. For GPU FISTA, add `CUDA` to the
+*calling project's* environment (`Pkg.add("CUDA")`), then check
+`CUDA.functional()` before moving the matrix and observations to the GPU.
+The optional Gurobi backend requires `JuMP`, `Gurobi`, and a working Gurobi
+license in that environment.
+
 ## What is provided
 
 | Reconstruction problem | Solver | Current support |
@@ -106,12 +132,18 @@ solve_path!(solver, [2.0, 0.5, 0.2]; store=false,
 ```
 
 A callback can write each result to your own checkpoint. On-disk resume is
-not yet integrated.
+not yet integrated. For a GPU path, the solver keeps its matrix, observations,
+and workspaces on the GPU across lambda values; it does not re-upload them at
+each point. `store=true` retains a separate coefficient snapshot per point on
+the GPU. With `store=false`, `on_result` receives an owned snapshot but the path
+does not retain it. Explicit CPU copies still incur a transfer.
 
 For grouped model selection, `ordered_group_folds` keeps whole days (or
 other supplied groups) together, and `cross_validate` evaluates shared
 `lambda/lambda_max` ratios with a fresh training-only `lambda_max` in each
-fold. See [grouped cross-validation](docs/cross_validation.md).
+fold. See [grouped cross-validation](docs/cross_validation.md). CV suggests path
+ratios but does not automatically refit on all observations or establish
+physical identifiability.
 
 ## Choosing a method
 
@@ -133,6 +165,7 @@ pass a justified positive step. See [performance](docs/performance.md).
 - [Overview and reading guide](docs/index.md)
 - [Mathematical models and algorithms](docs/mathematics.md)
 - [Optimality and stopping](docs/optimality.md)
+- [Grouped cross-validation](docs/cross_validation.md)
 - [Performance: defaults, costs, and trade-offs](docs/performance.md)
 - [Architecture and migration status](docs/architecture.md)
 

@@ -95,6 +95,13 @@ the CPU or checking diagnostics too frequently can synchronize
 the device and erode the speedup. The final KKT check also contains
 reductions and may synchronize.
 
+`solve_path!` keeps the same GPU-resident solver, matrix, observations, and
+workspaces throughout the path; it does not transfer $A$ at each lambda.
+With `store=true`, every path point retains its own GPU coefficient snapshot,
+so GPU memory grows with path length. With `store=false`, the callback still
+receives one owned result snapshot per point, but Spasmi does not retain it
+after the callback. Transfer or persist only the points you need.
+
 The current optional CUDA tests include the NVIDIA RTX PRO 6000
 Blackwell. GPU speedup is workload-dependent; the included
 `benchmark/gpu_fista.jl` compares fixed-iteration CPU/GPU runs and

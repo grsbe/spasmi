@@ -65,10 +65,10 @@ The CUDA runtime emitted warnings about loading cuSPARSE and nvJitLink
 from the system CUDA installation; the solves and CPU/GPU parity tests
 completed successfully.
 
-## Time to Spasmi's default FISTA stop
+## Historical time to the gradient-mapping FISTA stop
 
-The separate [convergence script](../../srt_testdata_convergence.jl) uses
-`GradientMappingStop(atol=0, rtol=0.001, check_every=1, maxiter=10000)`
+The archived run of the [convergence script](../../srt_testdata_convergence.jl)
+used `GradientMappingStop(atol=0, rtol=0.001, check_every=1, maxiter=10000)`
 on the same SNR30 nonnegative LASSO, with the same $\lambda$, matrix, and
 power-estimated step as above. The only solver variants are CPU dense FISTA,
 GPU dense FISTA, and GPU CSR FISTA. Three zero-started solves per variant
@@ -80,7 +80,8 @@ transfer and initialization, and GPU runs are synchronized.
 | Ada run | 5.366 s | 1.496 s | **0.569 s** |
 | Blackwell run | 5.231 s | 0.777 s | **0.391 s** |
 
-All variants stopped by the default gradient-mapping criterion after
+These archived runs used the then-default gradient-mapping criterion, not
+Spasmi's current `DualGapStop` default. All variants stopped after
 **2,118 iterations**. CPU and GPU predictions agree to approximately
 $4\times10^{-15}$ relative to $\|b\|_2$. Their final objective is
 $2.92796736\times10^{-6}$, residual norm is 0.00218756, and
@@ -103,5 +104,9 @@ julia --project=/home/tobias-grasberger/.cache/spasmi-bench-RoR2tH \
 
 Use `SPASMI_SRT_GPU_DEVICE=0` for Ada and
 `SPASMI_SRT_ITERATIONS=40` for the short fixed-iteration run. For the
-default-stop run, replace the script name in the command with
-`benchmark/srt_testdata_convergence.jl` (the iteration override is ignored).
+historical gradient-mapping setup, replace the script name in the
+command with `benchmark/srt_testdata_convergence.jl` (the iteration override
+is ignored). That script now inherits the package default; explicitly pass
+`GradientMappingStop(atol=0, rtol=0.001, check_every=1, maxiter=10000)`
+to select the archived stopping-policy parameters. The corrected current
+nonnegative mapping scale can still make results differ from this old run.

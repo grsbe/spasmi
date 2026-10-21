@@ -24,6 +24,8 @@ cv.fold_converged            # numerical convergence of each training fit
 ```
 
 Alternatively, pass your own positive, consecutive `fold_ids` directly.
+Without an explicit `order`, groups follow first appearance in the input;
+supply `order` if that is not the intended temporal order.
 `assignment=:contiguous` holds out adjacent groups instead of round-robin
 groups. Neither choice removes possible temporal dependence across fold
 boundaries; add an explicit gap in your data preparation if needed.
@@ -42,3 +44,11 @@ fits remain available for diagnosis. SE is the sample standard deviation of
 the fold scores divided by the square root of the fold count. CV is a
 diagnostic for predictive error, not proof that the recovered emission field
 is physically identifiable.
+
+This workflow currently accepts `LassoProblem` with `FISTA()` or `ADMM()`;
+it is not a general CV interface for the other objectives. Use ADMM with a
+dense CPU design. GPU CSR fold slicing has not been validated as a supported
+CV path. CV does not refit on all observations: after choosing a ratio,
+compute the full-data `lambda_max`, form that absolute lambda, and run a
+separate full-data solve or path. Keep weighting and units consistent across
+folds and the refit.

@@ -18,6 +18,7 @@ src/
   solvers/laplacian_fista.jl CPU L1 + squared-Laplacian FISTA
   solvers/tv_pdhg.jl        CPU L1 + TV PDHG, primal-dual checks
   workflows/paths.jl       lambda paths and per-point callback
+  workflows/cross_validation.jl ordered-group LASSO cross-validation
   api.jl                   new problem → method → result interface
   compatibility_api.jl     selected old SRT names
 ```
@@ -39,8 +40,10 @@ diagnostics may differ.
 | Basic LASSO QP via Gurobi | `ext/SpasmiGurobiExt.jl` | Optional extension implemented |
 | Other Gurobi formulations | `ext/SpasmiGurobiExt.jl` | Not yet ported |
 
-Hyperparameter search and uncertainty/resampling belong in `workflows/`, not
-inside the solvers. GPU FISTA is a first-class implementation of the same
+Ordered-group LASSO cross-validation is implemented in `workflows/`;
+uncertainty/resampling and other hyperparameter workflows are not. These
+workflows do not belong inside the solvers. GPU FISTA is a first-class
+implementation of the same
 penalized-LASSO problem; CUDA remains optional. Real-device Float32/Float64
 parity passed on Blackwell. An optional fixed-iteration benchmark exists, but
 larger ill-conditioned workloads, sparse device matrices, and systematic
@@ -57,7 +60,7 @@ performance characterization still need validation.
    adding each method to the public API.
 4. Keep compatibility wrappers small and separately tested. A similar name
    does not promise identical defaults, stopping, or package identity.
-5. Extend the new grouped validation workflow where needed; add atomic path
+5. Extend grouped validation beyond LASSO where needed; add atomic path
    checkpointing and device CI before claiming full SRT replacement.
 
 This is a development package. The package name, UUID, and public interface
